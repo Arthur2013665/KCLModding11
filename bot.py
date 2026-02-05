@@ -274,15 +274,16 @@ class DiscordBot(commands.Bot):
         """Cleanup when bot is shutting down"""
         logger.info("Shutting down bot...")
         
-        # Send shutdown message to bot log channels
-        await self.send_bot_log_to_all_guilds(
-            title="🔴 Bot Shutting Down",
-            description=f"**{self.user.name}** is going offline.",
-            color=config.Colors.ERROR,
-            fields=[
-                ("Uptime", f"<t:{int(self.start_time.timestamp())}:R>", True)
-            ]
-        )
+        # Send shutdown message to bot log channels (only if logged in)
+        if self.user:
+            await self.send_bot_log_to_all_guilds(
+                title="🔴 Bot Shutting Down",
+                description=f"**{self.user.name}** is going offline.",
+                color=config.Colors.ERROR,
+                fields=[
+                    ("Uptime", f"<t:{int(self.start_time.timestamp())}:R>", True)
+                ]
+            )
         
         if self.db:
             await self.db.close()

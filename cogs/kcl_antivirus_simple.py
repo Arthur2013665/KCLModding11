@@ -789,18 +789,17 @@ class KCLAntivirusSimple(commands.Cog):
     
     @app_commands.command(name="server-file-scan")
     @app_commands.describe(
-        hours="How many hours back to scan files (default: 24)",
         channel="Specific channel to scan (optional)"
     )
     @is_moderator()
-    async def server_file_scan(self, interaction, hours: int = 24, channel: discord.TextChannel = None):
-        """Scan all files uploaded to the server in the specified time period"""
+    async def server_file_scan(self, interaction, channel: discord.TextChannel = None):
+        """Scan all files uploaded to the server from all time"""
         await interaction.response.defer()
         
         # Start scan
         embed = discord.Embed(
             title="📁 Server File Scan Initiated",
-            description=f"Scanning files from the last {hours} hours...",
+            description="Scanning all files from all time...",
             color=config.Colors.INFO,
             timestamp=datetime.utcnow()
         )
@@ -812,26 +811,25 @@ class KCLAntivirusSimple(commands.Cog):
         
         await interaction.followup.send(embed=embed)
         
-        # Perform file scan
-        scan_results = await self._perform_file_scan(interaction.guild, hours, channel)
+        # Perform file scan (None = all time)
+        scan_results = await self._perform_file_scan(interaction.guild, None, channel)
         
         # Send results
-        await self._send_file_scan_results(interaction, scan_results, hours, channel)
+        await self._send_file_scan_results(interaction, scan_results, None, channel)
     
     @app_commands.command(name="server-link-scan")
     @app_commands.describe(
-        hours="How many hours back to scan links (default: 24)",
         channel="Specific channel to scan (optional)"
     )
     @is_moderator()
-    async def server_link_scan(self, interaction, hours: int = 24, channel: discord.TextChannel = None):
-        """Scan all links posted to the server in the specified time period"""
+    async def server_link_scan(self, interaction, channel: discord.TextChannel = None):
+        """Scan all links posted to the server from all time"""
         await interaction.response.defer()
         
         # Start scan
         embed = discord.Embed(
             title="🔗 Server Link Scan Initiated",
-            description=f"Scanning links from the last {hours} hours...",
+            description="Scanning all links from all time...",
             color=config.Colors.INFO,
             timestamp=datetime.utcnow()
         )
@@ -843,26 +841,25 @@ class KCLAntivirusSimple(commands.Cog):
         
         await interaction.followup.send(embed=embed)
         
-        # Perform link scan
-        scan_results = await self._perform_link_scan(interaction.guild, hours, channel)
+        # Perform link scan (None = all time)
+        scan_results = await self._perform_link_scan(interaction.guild, None, channel)
         
         # Send results
-        await self._send_link_scan_results(interaction, scan_results, hours, channel)
+        await self._send_link_scan_results(interaction, scan_results, None, channel)
     
     @app_commands.command(name="server-file-link-scan")
     @app_commands.describe(
-        hours="How many hours back to scan files and links (default: 24)",
         channel="Specific channel to scan (optional)"
     )
     @is_moderator()
-    async def server_file_link_scan(self, interaction, hours: int = 24, channel: discord.TextChannel = None):
-        """Scan all files and links posted to the server in the specified time period"""
+    async def server_file_link_scan(self, interaction, channel: discord.TextChannel = None):
+        """Scan all files and links posted to the server from all time"""
         await interaction.response.defer()
         
         # Start scan
         embed = discord.Embed(
             title="📁🔗 Server File & Link Scan Initiated",
-            description=f"Scanning files and links from the last {hours} hours...",
+            description="Scanning all files and links from all time...",
             color=config.Colors.INFO,
             timestamp=datetime.utcnow()
         )
@@ -874,12 +871,12 @@ class KCLAntivirusSimple(commands.Cog):
         
         await interaction.followup.send(embed=embed)
         
-        # Perform combined scan
-        file_results = await self._perform_file_scan(interaction.guild, hours, channel)
-        link_results = await self._perform_link_scan(interaction.guild, hours, channel)
+        # Perform combined scan (None = all time)
+        file_results = await self._perform_file_scan(interaction.guild, None, channel)
+        link_results = await self._perform_link_scan(interaction.guild, None, channel)
         
         # Send combined results
-        await self._send_combined_scan_results(interaction, file_results, link_results, hours, channel)
+        await self._send_combined_scan_results(interaction, file_results, link_results, None, channel)
     
     @app_commands.command(name="server-lockdown")
     @app_commands.describe(reason="Reason for the lockdown")
@@ -1138,7 +1135,8 @@ class KCLAntivirusSimple(commands.Cog):
             'errors': []
         }
         
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        # If hours is None, scan all time (no cutoff)
+        cutoff_time = datetime.utcnow() - timedelta(hours=hours) if hours else None
         channels_to_scan = [target_channel] if target_channel else guild.text_channels
         
         for channel in channels_to_scan:
@@ -1149,77 +1147,87 @@ class KCLAntivirusSimple(commands.Cog):
             results['channels_scanned'] += 1
             
             try:
-                async for message in channel.history(limit=1000, after=cutoff_time):
-                    if message.attachments:
-                        for attachment in message.attachments:
-                            results['files_scanned'] += 1
+                # Scan all messages if cutoff_time is None, otherwise use after parameter
+                if cutoff_time:
+                    async for message in channel.history(limit=1000, after=cutoff_time):
+                        await self._process_message_attachments(message, results, channel)
+                else:
+                    # Scan all time - no limit on time, but limit messages per channel
+                    async for message in channel.history(limit=None):
+                        await self._process_message_attachments(message, results, channel)
                             
-                            # Check file extension first
-                            file_ext = attachment.filename.lower().split('.')[-1] if '.' in attachment.filename else ''
+            except Exception as e:
+                results['errors'].append(f"Error scanning channel {channel.name}: {str(e)[:100]}")
+        
+        return results
+    
+    async def _process_message_attachments(self, message, results, channel):
+        """Process attachments in a message for scanning"""
+        if message.attachments:
+            for attachment in message.attachments:
+                results['files_scanned'] += 1
+                
+                # Check file extension first
+                file_ext = attachment.filename.lower().split('.')[-1] if '.' in attachment.filename else ''
+                
+                if f'.{file_ext}' in config.KCLAntivirus.DANGEROUS_EXTENSIONS:
+                    results['threats_found'] += 1
+                    results['malicious_files'].append({
+                        'name': attachment.filename,
+                        'user': message.author,
+                        'channel': channel,
+                        'message_id': message.id,
+                        'reason': 'Dangerous file extension',
+                        'timestamp': message.created_at
+                    })
+                    continue
+                
+                if f'.{file_ext}' in config.KCLAntivirus.SAFE_EXTENSIONS:
+                    results['safe_files'] += 1
+                    continue
+                
+                # Scan with VirusTotal if possible
+                if attachment.size <= config.KCLAntivirus.MAX_FILE_SIZE_MB * 1024 * 1024:
+                    try:
+                        scan_result = await self._virustotal_scan_file(attachment)
+                        if scan_result:
+                            stats = scan_result.get('stats', {})
+                            malicious = stats.get('malicious', 0)
+                            suspicious = stats.get('suspicious', 0)
                             
-                            if f'.{file_ext}' in config.KCLAntivirus.DANGEROUS_EXTENSIONS:
+                            if malicious >= config.KCLAntivirus.MALICIOUS_THRESHOLD:
                                 results['threats_found'] += 1
                                 results['malicious_files'].append({
                                     'name': attachment.filename,
                                     'user': message.author,
                                     'channel': channel,
                                     'message_id': message.id,
-                                    'reason': 'Dangerous file extension',
+                                    'reason': f'{malicious} engines detected malware',
                                     'timestamp': message.created_at
                                 })
-                                continue
-                            
-                            if f'.{file_ext}' in config.KCLAntivirus.SAFE_EXTENSIONS:
-                                results['safe_files'] += 1
-                                continue
-                            
-                            # Scan with VirusTotal if possible
-                            if attachment.size <= config.KCLAntivirus.MAX_FILE_SIZE_MB * 1024 * 1024:
-                                try:
-                                    scan_result = await self._virustotal_scan_file(attachment)
-                                    if scan_result:
-                                        stats = scan_result.get('stats', {})
-                                        malicious = stats.get('malicious', 0)
-                                        suspicious = stats.get('suspicious', 0)
-                                        
-                                        if malicious >= config.KCLAntivirus.MALICIOUS_THRESHOLD:
-                                            results['threats_found'] += 1
-                                            results['malicious_files'].append({
-                                                'name': attachment.filename,
-                                                'user': message.author,
-                                                'channel': channel,
-                                                'message_id': message.id,
-                                                'reason': f'{malicious} engines detected malware',
-                                                'timestamp': message.created_at
-                                            })
-                                        elif suspicious >= config.KCLAntivirus.SUSPICIOUS_THRESHOLD:
-                                            results['threats_found'] += 1
-                                            results['suspicious_files'].append({
-                                                'name': attachment.filename,
-                                                'user': message.author,
-                                                'channel': channel,
-                                                'message_id': message.id,
-                                                'reason': f'{suspicious} engines flagged as suspicious',
-                                                'timestamp': message.created_at
-                                            })
-                                        else:
-                                            results['safe_files'] += 1
-                                    else:
-                                        results['safe_files'] += 1
-                                except Exception as e:
-                                    results['errors'].append(f"Error scanning {attachment.filename}: {str(e)[:100]}")
-                                    results['safe_files'] += 1
+                            elif suspicious >= config.KCLAntivirus.SUSPICIOUS_THRESHOLD:
+                                results['threats_found'] += 1
+                                results['suspicious_files'].append({
+                                    'name': attachment.filename,
+                                    'user': message.author,
+                                    'channel': channel,
+                                    'message_id': message.id,
+                                    'reason': f'{suspicious} engines flagged as suspicious',
+                                    'timestamp': message.created_at
+                                })
                             else:
-                                results['errors'].append(f"File too large to scan: {attachment.filename}")
                                 results['safe_files'] += 1
-                            
-                            # Small delay to avoid rate limits
-                            await asyncio.sleep(0.1)
-                            
-            except Exception as e:
-                results['errors'].append(f"Error scanning channel {channel.name}: {str(e)[:100]}")
-        
-        return results
+                        else:
+                            results['safe_files'] += 1
+                    except Exception as e:
+                        results['errors'].append(f"Error scanning {attachment.filename}: {str(e)[:100]}")
+                        results['safe_files'] += 1
+                else:
+                    results['errors'].append(f"File too large to scan: {attachment.filename}")
+                    results['safe_files'] += 1
+                
+                # Small delay to avoid rate limits
+                await asyncio.sleep(0.1)
     
     async def _perform_link_scan(self, guild, hours, target_channel=None):
         """Perform comprehensive link scan"""
@@ -1234,7 +1242,8 @@ class KCLAntivirusSimple(commands.Cog):
             'errors': []
         }
         
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        # If hours is None, scan all time (no cutoff)
+        cutoff_time = datetime.utcnow() - timedelta(hours=hours) if hours else None
         channels_to_scan = [target_channel] if target_channel else guild.text_channels
         
         for channel in channels_to_scan:
@@ -1245,54 +1254,64 @@ class KCLAntivirusSimple(commands.Cog):
             results['channels_scanned'] += 1
             
             try:
-                async for message in channel.history(limit=1000, after=cutoff_time):
-                    urls = self.url_pattern.findall(message.content)
-                    
-                    for url in urls:
-                        results['links_scanned'] += 1
-                        
-                        try:
-                            scan_result = await self._virustotal_scan_url(url)
-                            if scan_result:
-                                stats = scan_result.get('stats', {})
-                                malicious = stats.get('malicious', 0)
-                                suspicious = stats.get('suspicious', 0)
-                                
-                                if malicious >= config.KCLAntivirus.MALICIOUS_THRESHOLD:
-                                    results['threats_found'] += 1
-                                    results['malicious_links'].append({
-                                        'url': url,
-                                        'user': message.author,
-                                        'channel': channel,
-                                        'message_id': message.id,
-                                        'reason': f'{malicious} engines detected malware',
-                                        'timestamp': message.created_at
-                                    })
-                                elif suspicious >= config.KCLAntivirus.SUSPICIOUS_THRESHOLD:
-                                    results['threats_found'] += 1
-                                    results['suspicious_links'].append({
-                                        'url': url,
-                                        'user': message.author,
-                                        'channel': channel,
-                                        'message_id': message.id,
-                                        'reason': f'{suspicious} engines flagged as suspicious',
-                                        'timestamp': message.created_at
-                                    })
-                                else:
-                                    results['safe_links'] += 1
-                            else:
-                                results['safe_links'] += 1
-                        except Exception as e:
-                            results['errors'].append(f"Error scanning URL {url[:50]}...: {str(e)[:100]}")
-                            results['safe_links'] += 1
-                        
-                        # Small delay to avoid rate limits
-                        await asyncio.sleep(0.2)
+                # Scan all messages if cutoff_time is None, otherwise use after parameter
+                if cutoff_time:
+                    async for message in channel.history(limit=1000, after=cutoff_time):
+                        await self._process_message_urls(message, results, channel)
+                else:
+                    # Scan all time - no limit on time, but limit messages per channel
+                    async for message in channel.history(limit=None):
+                        await self._process_message_urls(message, results, channel)
                         
             except Exception as e:
                 results['errors'].append(f"Error scanning channel {channel.name}: {str(e)[:100]}")
         
         return results
+    
+    async def _process_message_urls(self, message, results, channel):
+        """Process URLs in a message for scanning"""
+        urls = self.url_pattern.findall(message.content)
+        
+        for url in urls:
+            results['links_scanned'] += 1
+            
+            try:
+                scan_result = await self._virustotal_scan_url(url)
+                if scan_result:
+                    stats = scan_result.get('stats', {})
+                    malicious = stats.get('malicious', 0)
+                    suspicious = stats.get('suspicious', 0)
+                    
+                    if malicious >= config.KCLAntivirus.MALICIOUS_THRESHOLD:
+                        results['threats_found'] += 1
+                        results['malicious_links'].append({
+                            'url': url,
+                            'user': message.author,
+                            'channel': channel,
+                            'message_id': message.id,
+                            'reason': f'{malicious} engines detected malware',
+                            'timestamp': message.created_at
+                        })
+                    elif suspicious >= config.KCLAntivirus.SUSPICIOUS_THRESHOLD:
+                        results['threats_found'] += 1
+                        results['suspicious_links'].append({
+                            'url': url,
+                            'user': message.author,
+                            'channel': channel,
+                            'message_id': message.id,
+                            'reason': f'{suspicious} engines flagged as suspicious',
+                            'timestamp': message.created_at
+                        })
+                    else:
+                        results['safe_links'] += 1
+                else:
+                    results['safe_links'] += 1
+            except Exception as e:
+                results['errors'].append(f"Error scanning URL {url[:50]}...: {str(e)[:100]}")
+                results['safe_links'] += 1
+            
+            # Small delay to avoid rate limits
+            await asyncio.sleep(0.2)
     
     async def _send_file_scan_results(self, interaction, results, hours, channel):
         """Send file scan results"""
@@ -1310,9 +1329,10 @@ class KCLAntivirusSimple(commands.Cog):
         )
         
         # Time period
+        time_period = "All time" if hours is None else f"Last {hours} hours"
         embed.add_field(
             name="⏰ Scan Period",
-            value=f"Last {hours} hours\n{'All channels' if not channel else f'Only {channel.mention}'}",
+            value=f"{time_period}\n{'All channels' if not channel else f'Only {channel.mention}'}",
             inline=True
         )
         
@@ -1361,9 +1381,10 @@ class KCLAntivirusSimple(commands.Cog):
         )
         
         # Time period
+        time_period = "All time" if hours is None else f"Last {hours} hours"
         embed.add_field(
             name="⏰ Scan Period",
-            value=f"Last {hours} hours\n{'All channels' if not channel else f'Only {channel.mention}'}",
+            value=f"{time_period}\n{'All channels' if not channel else f'Only {channel.mention}'}",
             inline=True
         )
         
@@ -1421,9 +1442,10 @@ class KCLAntivirusSimple(commands.Cog):
             inline=True
         )
         
+        time_period = "All time" if hours is None else f"Last {hours} hours"
         embed.add_field(
             name="⏰ Scan Period",
-            value=f"Last {hours} hours\n{'All channels' if not channel else f'Only {channel.mention}'}",
+            value=f"{time_period}\n{'All channels' if not channel else f'Only {channel.mention}'}",
             inline=True
         )
         
