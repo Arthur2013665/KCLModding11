@@ -580,6 +580,51 @@ class KCLAntivirusSimple(commands.Cog):
         except Exception as e:
             logger.error(f"Error handling threat: {e}")
     
+    async def _take_action_on_threat(self, message, item_name, threat_level):
+        """Take action on threats found during server scans - delete message and timeout user"""
+        try:
+            # Check if user is protected (skip action if they are)
+            if await self._is_protected_user(message.author):
+                logger.info(f"Skipping action on protected user {message.author} for {item_name}")
+                return
+            
+            # Delete the message
+            try:
+                await message.delete()
+                logger.info(f"Deleted message {message.id} containing threat: {item_name}")
+            except discord.NotFound:
+                logger.warning(f"Message {message.id} already deleted")
+            except Exception as e:
+                logger.error(f"Failed to delete message {message.id}: {e}")
+            
+            # Timeout the user
+            try:
+                timeout_duration = timedelta(days=config.KCLAntivirus.VIRUS_TIMEOUT_DAYS)
+                await message.author.timeout(timeout_duration, reason=f"KCLAntivirus Server Scan: {threat_level} content detected ({item_name})")
+                logger.info(f"Timed out user {message.author} for {config.KCLAntivirus.VIRUS_TIMEOUT_DAYS} day(s)")
+            except Exception as e:
+                logger.error(f"Failed to timeout user {message.author}: {e}")
+            
+            # Add warning
+            try:
+                await self.bot.db.add_warning(
+                    message.author.id,
+                    message.guild.id,
+                    self.bot.user.id,
+                    f"KCLAntivirus Server Scan: Posted {threat_level.lower()} content ({item_name})"
+                )
+            except Exception as e:
+                logger.error(f"Failed to add warning: {e}")
+            
+            # DM the user
+            try:
+                await self._dm_user_threat(message.author, item_name, threat_level, 1, 0)
+            except Exception as e:
+                logger.error(f"Failed to DM user: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error taking action on threat: {e}")
+    
     async def _handle_dangerous_file(self, message, attachment):
         """Handle files with dangerous extensions"""
         await self._handle_threat(
@@ -1428,7 +1473,7 @@ class KCLAntivirusSimple(commands.Cog):
         return results
     
     async def _process_message_attachments(self, message, results, channel):
-        """Process attachments in a message for scanning"""
+        """Process attachments in a message for scanning and take action on threats"""
         if message.attachments:
             for attachment in message.attachments:
                 results['files_scanned'] += 1
@@ -1436,6 +1481,7 @@ class KCLAntivirusSimple(commands.Cog):
                 # Check file extension first
                 file_ext = attachment.filename.lower().split('.')[-1] if '.' in attachment.filename else ''
                 
+                # Dangerous extensions - always block
                 if f'.{file_ext}' in config.KCLAntivirus.DANGEROUS_EXTENSIONS:
                     results['threats_found'] += 1
                     results['malicious_files'].append({
@@ -1446,10 +1492,28 @@ class KCLAntivirusSimple(commands.Cog):
                         'reason': 'Dangerous file extension',
                         'timestamp': message.created_at
                     })
+                    # Delete message and timeout user
+                    await self._take_action_on_threat(message, attachment.filename, "DANGEROUS FILE")
                     continue
                 
+                # Safe extensions - skip
                 if f'.{file_ext}' in config.KCLAntivirus.SAFE_EXTENSIONS:
                     results['safe_files'] += 1
+                    continue
+                
+                # Suspicious extensions - always scan and flag
+                if f'.{file_ext}' in config.KCLAntivirus.SUSPICIOUS_EXTENSIONS:
+                    results['threats_found'] += 1
+                    results['suspicious_files'].append({
+                        'name': attachment.filename,
+                        'user': message.author,
+                        'channel': channel,
+                        'message_id': message.id,
+                        'reason': 'Suspicious file extension',
+                        'timestamp': message.created_at
+                    })
+                    # Delete message and timeout user
+                    await self._take_action_on_threat(message, attachment.filename, "SUSPICIOUS FILE")
                     continue
                 
                 # Scan with VirusTotal if possible
@@ -1471,6 +1535,8 @@ class KCLAntivirusSimple(commands.Cog):
                                     'reason': f'{malicious} engines detected malware',
                                     'timestamp': message.created_at
                                 })
+                                # Delete message and timeout user
+                                await self._take_action_on_threat(message, attachment.filename, "MALICIOUS")
                             elif suspicious >= config.KCLAntivirus.SUSPICIOUS_THRESHOLD:
                                 results['threats_found'] += 1
                                 results['suspicious_files'].append({
@@ -1481,6 +1547,8 @@ class KCLAntivirusSimple(commands.Cog):
                                     'reason': f'{suspicious} engines flagged as suspicious',
                                     'timestamp': message.created_at
                                 })
+                                # Delete message and timeout user
+                                await self._take_action_on_threat(message, attachment.filename, "SUSPICIOUS")
                             else:
                                 results['safe_files'] += 1
                         else:
@@ -1535,13 +1603,44 @@ class KCLAntivirusSimple(commands.Cog):
         return results
     
     async def _process_message_urls(self, message, results, channel):
-        """Process URLs in a message for scanning"""
+        """Process URLs in a message for scanning and take action on threats"""
         urls = self.url_pattern.findall(message.content)
         
         for url in urls:
             results['links_scanned'] += 1
             
             try:
+                # Check for phishing domains first
+                if self._is_phishing_domain(url):
+                    results['threats_found'] += 1
+                    results['malicious_links'].append({
+                        'url': url,
+                        'user': message.author,
+                        'channel': channel,
+                        'message_id': message.id,
+                        'reason': 'Known phishing domain',
+                        'timestamp': message.created_at
+                    })
+                    # Delete message and timeout user
+                    await self._take_action_on_threat(message, url, "PHISHING")
+                    continue
+                
+                # Check for suspicious URL patterns
+                if self._is_suspicious_url(url):
+                    results['threats_found'] += 1
+                    results['suspicious_links'].append({
+                        'url': url,
+                        'user': message.author,
+                        'channel': channel,
+                        'message_id': message.id,
+                        'reason': 'Suspicious URL pattern (shortener/IP logger)',
+                        'timestamp': message.created_at
+                    })
+                    # Delete message and timeout user
+                    await self._take_action_on_threat(message, url, "SUSPICIOUS")
+                    continue
+                
+                # Scan with VirusTotal
                 scan_result = await self._virustotal_scan_url(url)
                 if scan_result:
                     stats = scan_result.get('stats', {})
@@ -1558,6 +1657,8 @@ class KCLAntivirusSimple(commands.Cog):
                             'reason': f'{malicious} engines detected malware',
                             'timestamp': message.created_at
                         })
+                        # Delete message and timeout user
+                        await self._take_action_on_threat(message, url, "MALICIOUS")
                     elif suspicious >= config.KCLAntivirus.SUSPICIOUS_THRESHOLD:
                         results['threats_found'] += 1
                         results['suspicious_links'].append({
@@ -1568,6 +1669,8 @@ class KCLAntivirusSimple(commands.Cog):
                             'reason': f'{suspicious} engines flagged as suspicious',
                             'timestamp': message.created_at
                         })
+                        # Delete message and timeout user
+                        await self._take_action_on_threat(message, url, "SUSPICIOUS")
                     else:
                         results['safe_links'] += 1
                 else:
