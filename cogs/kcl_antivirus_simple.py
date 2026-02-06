@@ -494,15 +494,15 @@ class KCLAntivirusSimple(commands.Cog):
             logger.error(f"Failed to alert mods about raid: {e}")
     
     async def _server_lockdown(self, guild, reason):
-        """Perform server lockdown - kick non-protected users"""
+        """Perform server lockdown - ban non-protected users for 5 days"""
         logger.critical(f"Server lockdown initiated in {guild.name}: {reason}")
         
         # Get protected roles
         protected_roles = await self.bot.db.get_antivirus_protected_roles(guild.id)
-        kicked_count = 0
+        banned_count = 0
         protected_count = 0
         
-        # Kick non-protected members
+        # Ban non-protected members
         for member in guild.members:
             if member.bot:
                 continue
@@ -512,42 +512,67 @@ class KCLAntivirusSimple(commands.Cog):
                 continue
             
             try:
-                # DM user before kicking
+                # DM user before banning
                 await self._dm_user_lockdown(member, reason)
                 await asyncio.sleep(0.5)  # Brief delay
                 
-                await member.kick(reason=f"KCLAntivirus Server Lockdown: {reason}")
-                kicked_count += 1
+                # Ban user with delete_message_days to clean up potential spam
+                await member.ban(
+                    reason=f"KCLAntivirus Server Lockdown: {reason}",
+                    delete_message_days=0
+                )
+                banned_count += 1
                 
             except Exception as e:
-                logger.error(f"Failed to kick {member}: {e}")
+                logger.error(f"Failed to ban {member}: {e}")
         
         # Log lockdown
-        await self._log_server_lockdown(guild, reason, kicked_count, protected_count)
+        await self._log_server_lockdown(guild, reason, banned_count, protected_count)
     
     async def _dm_user_lockdown(self, user, reason):
-        """DM user about server lockdown"""
+        """DM user about server lockdown with custom message"""
         try:
             embed = discord.Embed(
-                title="🔒 Server Lockdown - KCLAntivirus",
-                description=f"**{user.guild.name}** has been placed under emergency lockdown.",
+                title="🔒 Server Lockdown - Emergency Security Alert",
+                description=f"Hello {user.mention}! A server lockdown has happened because of a detected potential raid/hack that can affect you or others!",
                 color=config.Colors.ERROR,
                 timestamp=datetime.utcnow()
             )
             
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="What happened?", value="The server detected suspicious activity that may indicate a raid or security breach.", inline=False)
-            embed.add_field(name="What now?", value="You have been temporarily removed from the server for security. You can rejoin once the situation is resolved.", inline=False)
-            embed.add_field(name="Not your fault", value="This is an automated security measure. You did nothing wrong.", inline=False)
+            embed.add_field(
+                name="⏰ Lockdown Duration",
+                value="You can't join the server for **5 days** from the incident, but we advise you to not join the server for a minimum of **10 days** or until we solve the problem!",
+                inline=False
+            )
             
-            embed.set_footer(text="Contact server moderators if you have questions")
+            embed.add_field(
+                name="🔄 What Happens Next?",
+                value="If we can't solve the problem, we will eventually recreate the server if needed. But if the hack has been solved, everyone will be added back or can join back by the link in the description!",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="📺 Stay Updated",
+                value="Also check posts on YouTube to know if new links are available to join the Discord server!",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="Reason for Lockdown",
+                value=reason,
+                inline=False
+            )
+            
+            embed.set_footer(text="Signed by FMR • This is an automated security measure")
             
             await user.send(embed=embed)
             
         except discord.Forbidden:
             pass  # User has DMs disabled
+        except Exception as e:
+            logger.error(f"Failed to DM user {user}: {e}")
     
-    async def _log_server_lockdown(self, guild, reason, kicked_count, protected_count):
+    async def _log_server_lockdown(self, guild, reason, banned_count, protected_count):
         """Log server lockdown to mod channel"""
         settings = await self.bot.db.get_antivirus_settings(guild.id)
         if not settings.mod_log_channel:
@@ -565,9 +590,10 @@ class KCLAntivirusSimple(commands.Cog):
         )
         
         embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Users Kicked", value=str(kicked_count), inline=True)
+        embed.add_field(name="Users Banned", value=str(banned_count), inline=True)
         embed.add_field(name="Protected Users", value=str(protected_count), inline=True)
         embed.add_field(name="Total Members", value=str(len(guild.members)), inline=True)
+        embed.add_field(name="Ban Duration", value="5 days (recommended 10+ days)", inline=True)
         
         try:
             await log_channel.send("@everyone", embed=embed)
@@ -882,7 +908,7 @@ class KCLAntivirusSimple(commands.Cog):
     @app_commands.describe(reason="Reason for the lockdown")
     @is_moderator()
     async def force_server_lockdown(self, interaction, reason: str = None):
-        """Force server lockdown - kicks all non-protected users"""
+        """Force server lockdown - bans all non-protected users for 5 days"""
         if not reason:
             reason = f"Manual lockdown initiated by {interaction.user}"
         
@@ -891,12 +917,14 @@ class KCLAntivirusSimple(commands.Cog):
         # Show confirmation dialog
         embed = discord.Embed(
             title="⚠️ Confirm Server Lockdown",
-            description="This will kick ALL non-protected users from the server!",
+            description="This will BAN ALL non-protected users from the server for 5 days!",
             color=config.Colors.WARNING
         )
         
         embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Protected Users", value="Users with Admin, Manage Server, Manage Messages permissions and configured protected roles will NOT be kicked.", inline=False)
+        embed.add_field(name="Ban Duration", value="5 days (users advised to wait 10+ days)", inline=False)
+        embed.add_field(name="Protected Users", value="Users with Admin, Manage Server, Manage Messages permissions and configured protected roles will NOT be banned.", inline=False)
+        embed.add_field(name="DM Notification", value="All banned users will receive a DM with lockdown details and instructions.", inline=False)
         
         view = ConfirmLockdownView(self, interaction.guild, reason)
         
