@@ -84,9 +84,9 @@ class AutoMod:
 
 # KCLAntivirus Settings
 class KCLAntivirus:
-    # VirusTotal scan thresholds
-    MALICIOUS_THRESHOLD = 1  # Number of engines that must detect as malicious
-    SUSPICIOUS_THRESHOLD = 3  # Number of engines that must detect as suspicious
+    # VirusTotal scan thresholds (lowered to catch more threats)
+    MALICIOUS_THRESHOLD = 1  # Any single engine detection = malicious
+    SUSPICIOUS_THRESHOLD = 1  # Any single suspicious flag = suspicious
     
     # Timeout durations (in days)
     VIRUS_TIMEOUT_DAYS = 1
@@ -105,10 +105,118 @@ class KCLAntivirus:
     RAID_MESSAGE_THRESHOLD = 20  # Messages in time window
     
     # Protected file extensions (won't be scanned)
-    SAFE_EXTENSIONS = ['.txt', '.md', '.json', '.yml', '.yaml', '.log']
+    SAFE_EXTENSIONS = ['.txt', '.md', '.json', '.yml', '.yaml', '.log', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp4', '.mp3', '.wav', '.pdf']
     
     # Dangerous file extensions (always flagged)
-    DANGEROUS_EXTENSIONS = ['.exe', '.scr', '.bat', '.cmd', '.com', '.pif', '.vbs', '.js']
+    DANGEROUS_EXTENSIONS = [
+        '.exe', '.scr', '.bat', '.cmd', '.com', '.pif', '.vbs', '.js', '.jar', 
+        '.msi', '.app', '.deb', '.rpm', '.dmg', '.pkg', '.run', '.bin',
+        '.ps1', '.psm1', '.sh', '.bash', '.zsh', '.csh', '.fish',
+        '.apk', '.ipa', '.xap', '.appx',
+        '.dll', '.sys', '.drv', '.ocx',
+        '.hta', '.vbe', '.wsf', '.wsh', '.scf', '.lnk', '.inf', '.reg',
+        '.cpl', '.msc', '.gadget', '.application', '.msp', '.mst',
+        '.py', '.pyc', '.pyw', '.rb', '.pl', '.php', '.asp', '.aspx', '.jsp',
+        '.action', '.do', '.cgi',
+    ]
+    
+    # Suspicious file extensions (scanned more carefully)
+    SUSPICIOUS_EXTENSIONS = [
+        '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso', '.img',
+        '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp',
+        '.rtf', '.html', '.htm', '.svg', '.xml',
+    ]
+    
+    # Known phishing/scam domains (always blocked)
+    PHISHING_DOMAINS = [
+        'discoord.com',
+        'discordapp.ru',
+        'discordapp.io',
+        'discordnitro.ru',
+        'discordnitro.gift',
+        'discordgift.ru',
+        'discordsteam.com',
+        'steamcommunity.ru',
+        'steamcommunitty.com',
+        'steampowered.ru',
+        'steampovered.com',
+        'discrod.com',
+        'dlscord.com',
+        'discorb.com',
+        'discordapp.info',
+        'discordgift.info',
+        'discordnitro.info',
+        'discord-nitro.com',
+        'discord-gift.com',
+        'discordapp.click',
+        'discordgiveaway.com',
+        'discordpromo.com',
+        'free-nitro.com',
+        'get-nitro.com',
+        'steamcommunity.click',
+        'steamcommunlty.com',
+        'steancommunity.com',
+        'discordc.com',
+        'discorde.com',
+        'discordd.gift',
+        'discord.gift.ru',
+        'discordapp.com.ru',
+        'discordapp.net',
+        'discord-app.com',
+        'discord-app.net',
+        'discordgift.app',
+        'discordgifts.com',
+        'discordnitro.click',
+        'discordnitro.link',
+        'discord-free.com',
+        'discord-promo.com',
+        'steamcommunnity.com',
+        'steamcommunity.com.ru',
+        'steampowered.com.ru',
+        'steam-community.com',
+        'steam-powered.com',
+        'steamcommunity.org',
+        'steampowered.org',
+        'steamcommunlty.ru',
+        'steamcornmunity.com',
+        'stearnpowered.com',
+        'steancommunlty.com',
+    ]
+    
+    # Suspicious URL patterns (regex-like patterns)
+    SUSPICIOUS_URL_PATTERNS = [
+        'bit.ly',
+        'tinyurl.com',
+        'goo.gl',
+        't.co',
+        'ow.ly',
+        'is.gd',
+        'buff.ly',
+        'adf.ly',
+        'bc.vc',
+        'shorte.st',
+        'ouo.io',
+        'ouo.press',
+        'exe.io',
+        'linkvertise.com',
+        'link-to.net',
+        'sub2unlock.com',
+        'sub2get.com',
+        'loot-link.com',
+        'lootdest.com',
+        'lootlinks.co',
+        'work.ink',
+        'workink.net',
+        'grabify.link',
+        'iplogger.org',
+        'iplogger.com',
+        'iplogger.ru',
+        '2no.co',
+        'yip.su',
+        'cutt.ly',
+        'rb.gy',
+        'short.io',
+    ]
 
 # Validation
 def validate_config():

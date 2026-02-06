@@ -160,14 +160,27 @@ class KCLAntivirusSimple(commands.Cog):
                 # Check file extension
                 file_ext = attachment.filename.lower().split('.')[-1] if '.' in attachment.filename else ''
                 
+                # Check for dangerous extensions (always block)
                 if f'.{file_ext}' in config.KCLAntivirus.DANGEROUS_EXTENSIONS:
                     await self._handle_dangerous_file(message, attachment)
                     continue
                 
+                # Skip safe extensions
                 if f'.{file_ext}' in config.KCLAntivirus.SAFE_EXTENSIONS:
-                    continue  # Skip safe files
+                    continue
                 
-                # Scan with VirusTotal
+                # Check for suspicious extensions (scan more carefully)
+                if f'.{file_ext}' in config.KCLAntivirus.SUSPICIOUS_EXTENSIONS:
+                    # Always scan suspicious files with VirusTotal
+                    scan_result = await self._virustotal_scan_file(attachment)
+                    if scan_result:
+                        await self._handle_scan_result(message, scan_result, attachment.filename)
+                    else:
+                        # If VirusTotal fails, flag as suspicious anyway
+                        await self._handle_suspicious_file(message, attachment)
+                    continue
+                
+                # Scan all other files with VirusTotal
                 scan_result = await self._virustotal_scan_file(attachment)
                 if scan_result:
                     await self._handle_scan_result(message, scan_result, attachment.filename)
@@ -175,15 +188,240 @@ class KCLAntivirusSimple(commands.Cog):
             except Exception as e:
                 logger.error(f"Error scanning attachment {attachment.filename}: {e}")
     
+    async def _handle_suspicious_file(self, message, attachment):
+        """Handle files with suspicious extensions"""
+        await self._handle_threat(
+            message, 
+            attachment.filename, 
+            "SUSPICIOUS FILE TYPE", 
+            0, 
+            1
+        )
+    
     async def _scan_urls(self, message, urls):
         """Scan URLs for malicious content"""
         for url in urls:
             try:
+                # First check against phishing domain blacklist
+                if self._is_phishing_domain(url):
+                    await self._handle_phishing_url(message, url)
+                    continue
+                
+                # Check for suspicious URL patterns (URL shorteners, IP loggers, etc.)
+                if self._is_suspicious_url(url):
+                    await self._handle_suspicious_url(message, url)
+                    continue
+                
+                # Then scan with VirusTotal
                 scan_result = await self._virustotal_scan_url(url)
                 if scan_result:
                     await self._handle_scan_result(message, scan_result, url)
             except Exception as e:
                 logger.error(f"Error scanning URL {url}: {e}")
+    
+    def _is_phishing_domain(self, url):
+        """Check if URL contains a known phishing domain"""
+        url_lower = url.lower()
+        for phishing_domain in config.KCLAntivirus.PHISHING_DOMAINS:
+            if phishing_domain in url_lower:
+                return True
+        return False
+    
+    def _is_suspicious_url(self, url):
+        """Check if URL contains suspicious patterns (URL shorteners, IP loggers, etc.)"""
+        url_lower = url.lower()
+        for suspicious_pattern in config.KCLAntivirus.SUSPICIOUS_URL_PATTERNS:
+            if suspicious_pattern in url_lower:
+                return True
+        return False
+    
+    async def _handle_suspicious_url(self, message, url):
+        """Handle suspicious URL (URL shorteners, IP loggers, etc.)"""
+        try:
+            # Delete the message
+            await message.delete()
+            
+            # Timeout the user
+            timeout_duration = timedelta(days=config.KCLAntivirus.VIRUS_TIMEOUT_DAYS)
+            await message.author.timeout(timeout_duration, reason=f"KCLAntivirus: Posted suspicious URL ({url})")
+            
+            # Add warning
+            await self.bot.db.add_warning(
+                message.author.id,
+                message.guild.id,
+                self.bot.user.id,
+                f"KCLAntivirus: Posted suspicious URL (URL shortener/IP logger) ({url})"
+            )
+            
+            # Log to database
+            action_taken = f"Message deleted, user timed out for {config.KCLAntivirus.VIRUS_TIMEOUT_DAYS} day(s), warning added"
+            await self._log_scan_to_database(
+                message.guild.id,
+                message.author.id,
+                url,
+                "url",
+                "SUSPICIOUS",
+                0,
+                1,
+                action_taken
+            )
+            
+            # DM the user
+            await self._dm_user_suspicious_url(message.author, url)
+            
+            # Log to mod channel
+            await self._log_suspicious_url_detection(message, url)
+            
+            logger.warning(f"Suspicious URL detected: {url} by {message.author} in {message.guild}")
+            
+        except Exception as e:
+            logger.error(f"Error handling suspicious URL: {e}")
+    
+    async def _dm_user_suspicious_url(self, user, url):
+        """Send DM to user about suspicious URL detection"""
+        try:
+            embed = discord.Embed(
+                title="⚠️ KCLAntivirus - Suspicious URL Detected",
+                description=f"Your message in **{user.guild.name}** was removed because it contained a suspicious URL.",
+                color=config.Colors.WARNING,
+                timestamp=datetime.utcnow()
+            )
+            
+            embed.add_field(name="URL Detected", value=f"||{url}||", inline=False)
+            embed.add_field(name="Threat Type", value="Suspicious URL (URL shortener, IP logger, or ad link)", inline=True)
+            embed.add_field(name="Action Taken", value=f"• Message deleted\n• {config.KCLAntivirus.VIRUS_TIMEOUT_DAYS} day timeout\n• Warning added", inline=False)
+            embed.add_field(name="⚠️ Why?", value="URL shorteners and IP loggers can hide malicious links and track users. Please use direct links only.", inline=False)
+            
+            embed.set_footer(text="If you believe this is a false positive, contact server moderators")
+            
+            await user.send(embed=embed)
+            
+        except discord.Forbidden:
+            logger.info(f"Could not DM user {user} about suspicious URL detection")
+    
+    async def _log_suspicious_url_detection(self, message, url):
+        """Log suspicious URL detection to mod channel"""
+        settings = await self.bot.db.get_antivirus_settings(message.guild.id)
+        if not settings.mod_log_channel:
+            return
+        
+        log_channel = message.guild.get_channel(settings.mod_log_channel)
+        if not log_channel:
+            return
+        
+        embed = discord.Embed(
+            title="⚠️ KCLAntivirus - Suspicious URL Blocked",
+            color=config.Colors.WARNING,
+            timestamp=datetime.utcnow()
+        )
+        
+        embed.add_field(name="User", value=f"{message.author} ({message.author.id})", inline=True)
+        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+        embed.add_field(name="Threat Type", value="Suspicious URL Pattern", inline=True)
+        embed.add_field(name="URL", value=f"||{url}||", inline=False)
+        embed.add_field(name="Action", value=f"Message deleted, user timed out for {config.KCLAntivirus.VIRUS_TIMEOUT_DAYS} day(s)", inline=False)
+        
+        if message.content:
+            embed.add_field(name="Message Content", value=message.content[:1000], inline=False)
+        
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Failed to log suspicious URL detection: {e}")
+    
+    async def _handle_phishing_url(self, message, url):
+        """Handle detected phishing URL"""
+        try:
+            # Delete the message
+            await message.delete()
+            
+            # Timeout the user
+            timeout_duration = timedelta(days=config.KCLAntivirus.VIRUS_TIMEOUT_DAYS)
+            await message.author.timeout(timeout_duration, reason=f"KCLAntivirus: Posted phishing URL ({url})")
+            
+            # Add warning
+            await self.bot.db.add_warning(
+                message.author.id,
+                message.guild.id,
+                self.bot.user.id,
+                f"KCLAntivirus: Posted known phishing/scam URL ({url})"
+            )
+            
+            # Log to database
+            action_taken = f"Message deleted, user timed out for {config.KCLAntivirus.VIRUS_TIMEOUT_DAYS} day(s), warning added"
+            await self._log_scan_to_database(
+                message.guild.id,
+                message.author.id,
+                url,
+                "url",
+                "PHISHING",
+                1,
+                0,
+                action_taken
+            )
+            
+            # DM the user
+            await self._dm_user_phishing(message.author, url)
+            
+            # Log to mod channel
+            await self._log_phishing_detection(message, url)
+            
+            logger.warning(f"Phishing URL detected: {url} by {message.author} in {message.guild}")
+            
+        except Exception as e:
+            logger.error(f"Error handling phishing URL: {e}")
+    
+    async def _dm_user_phishing(self, user, url):
+        """Send DM to user about phishing URL detection"""
+        try:
+            embed = discord.Embed(
+                title="🚨 KCLAntivirus - Phishing URL Detected",
+                description=f"Your message in **{user.guild.name}** was removed because it contained a known phishing/scam URL.",
+                color=config.Colors.ERROR,
+                timestamp=datetime.utcnow()
+            )
+            
+            embed.add_field(name="URL Detected", value=f"||{url}||", inline=False)
+            embed.add_field(name="Threat Type", value="Known Phishing/Scam Domain", inline=True)
+            embed.add_field(name="Action Taken", value=f"• Message deleted\n• {config.KCLAntivirus.VIRUS_TIMEOUT_DAYS} day timeout\n• Warning added", inline=False)
+            embed.add_field(name="⚠️ Warning", value="This URL is designed to steal your Discord account or personal information. Never click on suspicious links!", inline=False)
+            
+            embed.set_footer(text="If you believe this is a false positive, contact server moderators")
+            
+            await user.send(embed=embed)
+            
+        except discord.Forbidden:
+            logger.info(f"Could not DM user {user} about phishing URL detection")
+    
+    async def _log_phishing_detection(self, message, url):
+        """Log phishing URL detection to mod channel"""
+        settings = await self.bot.db.get_antivirus_settings(message.guild.id)
+        if not settings.mod_log_channel:
+            return
+        
+        log_channel = message.guild.get_channel(settings.mod_log_channel)
+        if not log_channel:
+            return
+        
+        embed = discord.Embed(
+            title="🎣 KCLAntivirus - Phishing URL Blocked",
+            color=config.Colors.ERROR,
+            timestamp=datetime.utcnow()
+        )
+        
+        embed.add_field(name="User", value=f"{message.author} ({message.author.id})", inline=True)
+        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+        embed.add_field(name="Threat Type", value="Known Phishing Domain", inline=True)
+        embed.add_field(name="URL", value=f"||{url}||", inline=False)
+        embed.add_field(name="Action", value=f"Message deleted, user timed out for {config.KCLAntivirus.VIRUS_TIMEOUT_DAYS} day(s)", inline=False)
+        
+        if message.content:
+            embed.add_field(name="Message Content", value=message.content[:1000], inline=False)
+        
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Failed to log phishing detection: {e}")
     
     async def _virustotal_scan_file(self, attachment):
         """Scan file using VirusTotal API"""
